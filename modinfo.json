@@ -1,0 +1,21 @@
+{
+  "context": "client",
+  "identifier": "nik.auto-balance",
+  "display_name": "Auto Balance",
+  "description": "Automatically balances lobby teams by player skill rating. Uses HVI ratings as primary source with configurable defaults for unrated players.",
+  "author": "NikolaMX",
+  "version": "1.0.0",
+  "build": "114353",
+  "date": "2026-04-14",
+  "signature": "not implemented",
+  "titansOnly": false,
+  "classicOnly": false,
+  "priority": 101,
+  "category": ["lobby", "ui"],
+  "scenes": {
+    "new_game": [
+      "coui://ui/mods/nik.auto-balance/auto_balance.css",
+      "coui://ui/mods/nik.auto-balance/auto_balance.js"
+    ]
+  }
+}

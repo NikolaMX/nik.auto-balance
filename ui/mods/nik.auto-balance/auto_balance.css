@@ -1,0 +1,96 @@
+/* Auto-Balance mod - sits inside the spectator panel area */
+
+.spectator-balance-wrapper {
+    display: flex;
+    flex-direction: row;
+    gap: 8px;
+    width: 100%;
+}
+
+.spectator-balance-wrapper > .spectator-half {
+    flex: 1 1 50%;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.spectator-balance-wrapper > .balance-half {
+    flex: 1 1 50%;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.balance-panel {
+    border: 1px solid #5F5F5F;
+    box-shadow: inset 0px 0px 20px #000;
+    background: #0E1520;
+    padding: 8px 10px;
+    min-height: 66px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.balance-panel-header {
+    font-family: "Sansation";
+    font-size: 13px;
+    text-transform: uppercase;
+    color: #fff;
+    text-shadow: 0px 0px 20px #00b3ff;
+    padding: 0;
+    margin-bottom: 2px;
+}
+
+.auto-balance-btn {
+    cursor: pointer;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.auto-balance-btn.small {
+    font-size: 10px;
+    padding: 3px 8px;
+}
+
+.auto-balance-settings-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.auto-balance-settings-row label {
+    font-size: 10px;
+    color: #aaa;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.auto-balance-settings-row input[type="number"] {
+    background: #1a2a3a;
+    color: #ccc;
+    border: 1px solid #555;
+    padding: 1px 3px;
+    font-size: 10px;
+    width: 38px;
+}
+
+.auto-balance-status {
+    font-size: 10px;
+    color: #aaa;
+    min-height: 14px;
+    word-break: break-word;
+}
+
+.auto-balance-status.error {
+    color: #ff6666;
+}
+
+.auto-balance-status.success {
+    color: #66ff66;
+}
