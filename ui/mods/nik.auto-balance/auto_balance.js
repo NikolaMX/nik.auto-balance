@@ -350,12 +350,12 @@
         '<div class="balance-half" data-bind="visible: isGameCreator() && isTeamGame()">' +
             '<div class="balance-panel-header">AUTO-BALANCE</div>' +
             '<div class="balance-panel">' +
-                '<button class="btn_std_gray auto-balance-btn" data-bind="click: autoBalance, disable: autoBalanceRunning()">' +
-                    'Balance Teams' +
-                '</button>' +
-                '<button class="btn_std_gray auto-balance-btn small" data-bind="click: showPlayerRatings">' +
-                    'Show Ratings' +
-                '</button>' +
+                '<div class="btn_std_gray auto-balance-btn" data-bind="click: autoBalance">' +
+                    '<div class="btn_std_label">Balance Teams</div>' +
+                '</div>' +
+                '<div class="btn_std_gray auto-balance-btn small" data-bind="click: showPlayerRatings">' +
+                    '<div class="btn_std_label">Show Ratings</div>' +
+                '</div>' +
                 '<div class="auto-balance-settings-row">' +
                     '<label>Def: <input type="number" step="0.5" min="0" max="10" data-bind="value: autoBalanceDefault" /></label>' +
                     '<label>Exp: <input type="number" step="0.1" min="0.1" max="3" data-bind="value: autoBalanceExponent" /></label>' +
