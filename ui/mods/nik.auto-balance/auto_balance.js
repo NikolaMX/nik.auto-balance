@@ -19,7 +19,6 @@
                                   // > 1.0 = skill dominates (solo carry)
 
     // ── State ──────────────────────────────────────────────────────────
-    var playerRatings = {};       // uberId -> { rating, source, name }
     var balanceStatus = ko.observable('');
     var balanceStatusClass = ko.observable('');
     var isBalancing = ko.observable(false);
@@ -28,55 +27,39 @@
 
     // ── Rating Sources ─────────────────────────────────────────────────
 
-    // Fetch HVI rating for a single player
+    var NULL_RATING = { uberId: null, rating: null, source: null };
+
+    // Fetch HVI rating for a single player. Always resolves, never rejects.
     function fetchHVIRating(uberName) {
         return new Promise(function (resolve) {
-            // First resolve the ubernet ID from display name
             api.net.ubernet(
                 '/GameClient/UserId?' + $.param({ TitleDisplayName: uberName }),
                 'GET', 'text'
             ).then(function (ubernetID) {
-                var parsed = JSON.parse(ubernetID);
-                var uberId = parsed.UberId;
+                var uberId;
+                try {
+                    uberId = JSON.parse(ubernetID).UberId;
+                } catch (e) {
+                    resolve(NULL_RATING);
+                    return;
+                }
+
+                if (!uberId) { resolve(NULL_RATING); return; }
 
                 $.ajax({
-                    url: HVI_URL + 'case=0&uberid=' + uberId + '&name=' + uberName,
+                    url: HVI_URL + 'case=0&uberid=' + uberId + '&name=' + encodeURIComponent(uberName),
                     dataType: 'json',
                     timeout: FETCH_TIMEOUT,
                     success: function (profile) {
                         if (profile && profile.name !== 'not registered' && profile.rating != null) {
-                            resolve({
-                                uberId: uberId,
-                                rating: parseFloat(profile.rating),
-                                source: 'HVI',
-                                name: uberName
-                            });
+                            resolve({ uberId: uberId, rating: parseFloat(profile.rating), source: 'HVI' });
                         } else {
-                            resolve({
-                                uberId: uberId,
-                                rating: null,
-                                source: null,
-                                name: uberName
-                            });
+                            resolve(NULL_RATING);
                         }
                     },
-                    error: function () {
-                        resolve({
-                            uberId: uberId,
-                            rating: null,
-                            source: null,
-                            name: uberName
-                        });
-                    }
+                    error: function () { resolve(NULL_RATING); }
                 });
-            }).fail(function () {
-                resolve({
-                    uberId: null,
-                    rating: null,
-                    source: null,
-                    name: uberName
-                });
-            });
+            }).fail(function () { resolve(NULL_RATING); });
         });
     }
 
@@ -219,13 +202,6 @@
                     rating: rating,
                     source: source
                 });
-
-                // Cache the rating
-                playerRatings[player.playerId] = {
-                    rating: rating,
-                    source: source,
-                    name: player.name
-                };
             }
 
             // Log ratings to chat
@@ -250,19 +226,26 @@
             var minTotal = Math.min.apply(null, teams.map(function (t) { return t.totalPower; }));
             var diff = maxTotal - minTotal;
 
-            // Execute the moves - assign players to their target armies
+            // Re-snapshot the lobby now (fetch took several seconds; players may have left).
+            // Build a set of currently-present player IDs so we skip stale entries.
+            var currentPlayers = getHumanPlayers();
+            var currentPlayerIds = {};
+            currentPlayers.forEach(function (p) { if (p.playerId) currentPlayerIds[p.playerId] = true; });
+
+            // Use army.index() (the game's army ID), not the array position.
             var humanArmyIndices = [];
             var armies = model.armies();
             for (var a = 0; a < armies.length; a++) {
                 if (!armies[a].aiArmy())
-                    humanArmyIndices.push(a);
+                    humanArmyIndices.push(armies[a].index());
             }
 
             var moveDelay = 0;
             teams.forEach(function (team, teamIdx) {
                 var targetArmy = humanArmyIndices[teamIdx];
+                if (targetArmy === undefined) return; // army count changed during fetch
                 team.players.forEach(function (player) {
-                    // Small delay between moves to avoid race conditions
+                    if (!player.playerId || !currentPlayerIds[player.playerId]) return;
                     setTimeout(function () {
                         model.send_message('move_player', {
                             player: player.playerId,
@@ -350,7 +333,7 @@
         '<div class="balance-half" data-bind="visible: isGameCreator() && isTeamGame()">' +
             '<div class="balance-panel-header">AUTO-BALANCE</div>' +
             '<div class="balance-panel">' +
-                '<div class="btn_std_gray auto-balance-btn" data-bind="click: autoBalance">' +
+                '<div class="btn_std_gray auto-balance-btn" data-bind="click: autoBalance, css: { btn_std_gray_disabled: autoBalanceRunning() }">' +
                     '<div class="btn_std_label">Balance Teams</div>' +
                 '</div>' +
                 '<div class="btn_std_gray auto-balance-btn small" data-bind="click: showPlayerRatings">' +
@@ -364,23 +347,24 @@
             '</div>' +
         '</div>';
 
-    // Split the spectator panel: wrap existing spectator content in a left half,
-    // add balance panel as a right half, using DOM moves (not clones) to
-    // preserve knockout bindings on spectator elements.
-    var $spectatorContainer = $('div.container-spectator');
-    if ($spectatorContainer.length) {
-        var $existingChildren = $spectatorContainer.children();
+    // Inject into td.spectators, which always exists in the DOM (unlike
+    // div.container-spectator which is inside a ko if: showSpectators block
+    // and may not exist when spectator limit is 0).
+    // We wrap the td's existing children (the ko-if block) in the left half,
+    // and append our balance panel as the right half.
+    var $spectatorsTd = $('td.spectators');
+    if ($spectatorsTd.length) {
+        var $existingChildren = $spectatorsTd.children();
 
-        // Create the flex wrapper and left half
         var $wrapper = $('<div class="spectator-balance-wrapper"></div>');
         var $leftHalf = $('<div class="spectator-half"></div>');
 
-        // Move (not clone) existing spectator children into the left half
+        // Move existing children (the ko if: showSpectators block) into left half
         $existingChildren.appendTo($leftHalf);
 
         $wrapper.append($leftHalf);
         $wrapper.append(balancePanelHTML);
-        $spectatorContainer.append($wrapper);
+        $spectatorsTd.append($wrapper);
     }
 
     console.log('Auto-Balance mod loaded');
