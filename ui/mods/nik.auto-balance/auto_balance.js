@@ -226,11 +226,10 @@
             var minTotal = Math.min.apply(null, teams.map(function (t) { return t.totalPower; }));
             var diff = maxTotal - minTotal;
 
-            // Re-snapshot the lobby now (fetch took several seconds; players may have left).
-            // Build a set of currently-present player IDs so we skip stale entries.
+            // Re-snapshot lobby after the fetch (players may have joined/left).
             var currentPlayers = getHumanPlayers();
-            var currentPlayerIds = {};
-            currentPlayers.forEach(function (p) { if (p.playerId) currentPlayerIds[p.playerId] = true; });
+            var currentArmyOf = {};   // playerId -> current armyIndex
+            currentPlayers.forEach(function (p) { if (p.playerId) currentArmyOf[p.playerId] = p.armyIndex; });
 
             // Use army.index() (the game's army ID), not the array position.
             var humanArmyIndices = [];
@@ -240,20 +239,66 @@
                     humanArmyIndices.push(armies[a].index());
             }
 
-            var moveDelay = 0;
+            // Build the target mapping: playerId -> target armyIndex
+            var targetArmyOf = {};
             teams.forEach(function (team, teamIdx) {
                 var targetArmy = humanArmyIndices[teamIdx];
-                if (targetArmy === undefined) return; // army count changed during fetch
+                if (targetArmy === undefined) return;
                 team.players.forEach(function (player) {
-                    if (!player.playerId || !currentPlayerIds[player.playerId]) return;
-                    setTimeout(function () {
-                        model.send_message('move_player', {
-                            player: player.playerId,
-                            army: targetArmy
-                        });
-                    }, moveDelay);
-                    moveDelay += 200;
+                    if (!player.playerId || !(player.playerId in currentArmyOf)) return;
+                    targetArmyOf[player.playerId] = targetArmy;
                 });
+            });
+
+            // Collect players who actually need to move
+            var needsMove = [];
+            Object.keys(targetArmyOf).forEach(function (pid) {
+                if (currentArmyOf[pid] !== targetArmyOf[pid])
+                    needsMove.push(pid);
+            });
+
+            // Prefer swap_players for opposite-direction pairs: avoids temporarily
+            // overcrowding an army's slots, which causes the server to spec players.
+            var scheduled = {};
+            var moveDelay = 0;
+            var directMoves = [];
+
+            needsMove.forEach(function (pid) {
+                if (scheduled[pid]) return;
+                var to = targetArmyOf[pid];
+                var from = currentArmyOf[pid];
+                // Find a counterpart going the opposite direction
+                var partner = null;
+                for (var i = 0; i < needsMove.length; i++) {
+                    var other = needsMove[i];
+                    if (!scheduled[other] && other !== pid &&
+                        currentArmyOf[other] === to && targetArmyOf[other] === from) {
+                        partner = other;
+                        break;
+                    }
+                }
+                if (partner) {
+                    scheduled[pid] = true;
+                    scheduled[partner] = true;
+                    setTimeout((function (p1, p2) {
+                        return function () {
+                            model.send_message('swap_players', { player1: p1, player2: p2 });
+                        };
+                    }(pid, partner)), moveDelay);
+                    moveDelay += 200;
+                } else {
+                    directMoves.push(pid);
+                }
+            });
+
+            // Fire any remaining direct moves after all swaps complete
+            directMoves.forEach(function (pid) {
+                setTimeout((function (p) {
+                    return function () {
+                        model.send_message('move_player', { player: p, army: targetArmyOf[p] });
+                    };
+                }(pid)), moveDelay);
+                moveDelay += 200;
             });
 
             // Show result after all moves complete
