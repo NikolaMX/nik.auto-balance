@@ -110,9 +110,14 @@
     }
 
     // Greedy number partitioning into K groups using power values.
-    // Sorts players by power descending, assigns each to the group
-    // with the lowest current total power.
-    function partitionPlayers(players, numTeams) {
+    // Sorts players by power descending, assigns each to the group with the
+    // lowest current total power that still has a free slot.
+    //
+    // capacities[i] is the number of slots team i (army i) can hold. Honouring
+    // it is what keeps us from ever assigning more players to an army than it
+    // has room for — overfilling an army is what makes the server bounce a
+    // moved player into a spectator slot (see doBalance scheduling below).
+    function partitionPlayers(players, capacities) {
         // Compute power for each player
         players.forEach(function (p) {
             p.power = ratingToPower(p.rating);
@@ -121,21 +126,24 @@
         // Sort by power descending
         players.sort(function (a, b) { return b.power - a.power; });
 
-        var teams = [];
-        for (var i = 0; i < numTeams; i++) {
-            teams.push({ players: [], totalPower: 0, totalRating: 0 });
-        }
+        var teams = capacities.map(function (cap) {
+            return { players: [], totalPower: 0, totalRating: 0, capacity: cap };
+        });
 
         for (var p = 0; p < players.length; p++) {
-            // Find team with lowest total power
-            var minTeam = 0;
-            var minPower = teams[0].totalPower;
-            for (var t = 1; t < teams.length; t++) {
+            // Find the team with a free slot and the lowest total power
+            var minTeam = -1;
+            var minPower = Infinity;
+            for (var t = 0; t < teams.length; t++) {
+                if (teams[t].players.length >= teams[t].capacity)
+                    continue;
                 if (teams[t].totalPower < minPower) {
                     minPower = teams[t].totalPower;
                     minTeam = t;
                 }
             }
+            if (minTeam === -1)
+                break; // no capacity left anywhere (only if players > total slots)
             teams[minTeam].players.push(players[p]);
             teams[minTeam].totalPower += players[p].power;
             teams[minTeam].totalRating += players[p].rating;
@@ -210,8 +218,32 @@
                 model.localChatMessage('Auto-Balance', p.name + ': ' + p.source);
             });
 
-            // Partition into teams
-            var teams = partitionPlayers(ratedPlayers, numTeams);
+            // Re-snapshot lobby after the fetch (players may have joined/left).
+            var currentPlayers = getHumanPlayers();
+            var currentArmyOf = {};   // playerId -> current armyIndex
+            currentPlayers.forEach(function (p) { if (p.playerId) currentArmyOf[p.playerId] = p.armyIndex; });
+
+            // Use army.index() (the game's army ID), not the array position, and
+            // record each army's slot capacity so we never over-assign.
+            var humanArmyIndices = [];
+            var armyCapacity = {};     // armyIndex -> total slots
+            var armies = model.armies();
+            for (var a = 0; a < armies.length; a++) {
+                if (armies[a].aiArmy()) continue;
+                var aIdx = armies[a].index();
+                humanArmyIndices.push(aIdx);
+                armyCapacity[aIdx] = armies[a].slots().length;
+            }
+
+            // Only balance players that are still present in the lobby.
+            var balancePlayers = ratedPlayers.filter(function (p) {
+                return p.playerId && (p.playerId in currentArmyOf);
+            });
+
+            // Partition into teams, capping each team at its army's slot count so
+            // the assignment can always be realised without overfilling an army.
+            var capacities = humanArmyIndices.map(function (idx) { return armyCapacity[idx]; });
+            var teams = partitionPlayers(balancePlayers, capacities);
 
             // Log team assignments
             model.localChatMessage('Auto-Balance', '── Team Assignments ──');
@@ -226,78 +258,87 @@
             var minTotal = Math.min.apply(null, teams.map(function (t) { return t.totalPower; }));
             var diff = maxTotal - minTotal;
 
-            // Re-snapshot lobby after the fetch (players may have joined/left).
-            var currentPlayers = getHumanPlayers();
-            var currentArmyOf = {};   // playerId -> current armyIndex
-            currentPlayers.forEach(function (p) { if (p.playerId) currentArmyOf[p.playerId] = p.armyIndex; });
-
-            // Use army.index() (the game's army ID), not the array position.
-            var humanArmyIndices = [];
-            var armies = model.armies();
-            for (var a = 0; a < armies.length; a++) {
-                if (!armies[a].aiArmy())
-                    humanArmyIndices.push(armies[a].index());
-            }
-
             // Build the target mapping: playerId -> target armyIndex
             var targetArmyOf = {};
             teams.forEach(function (team, teamIdx) {
                 var targetArmy = humanArmyIndices[teamIdx];
                 if (targetArmy === undefined) return;
                 team.players.forEach(function (player) {
-                    if (!player.playerId || !(player.playerId in currentArmyOf)) return;
                     targetArmyOf[player.playerId] = targetArmy;
                 });
             });
 
-            // Collect players who actually need to move
-            var needsMove = [];
-            Object.keys(targetArmyOf).forEach(function (pid) {
-                if (currentArmyOf[pid] !== targetArmyOf[pid])
-                    needsMove.push(pid);
+            // ── Realise the assignment safely ──────────────────────────────
+            // The server's move_player removes a player from their army FIRST
+            // and only then tries to add them to the target. If the target is
+            // full at that instant the add fails and the player is left army-less
+            // — i.e. dumped into a spectator slot. To avoid that we simulate the
+            // lobby's live slot counts and only ever:
+            //   • move a player into an army that currently has a free slot, or
+            //   • swap with someone in a full target army who doesn't belong there
+            //     (a swap exchanges slots and can never overfill).
+            var liveArmyOf = {};
+            var liveCount = {};
+            humanArmyIndices.forEach(function (idx) { liveCount[idx] = 0; });
+            balancePlayers.forEach(function (p) {
+                var army = currentArmyOf[p.playerId];
+                liveArmyOf[p.playerId] = army;
+                liveCount[army] = (liveCount[army] || 0) + 1;
             });
 
-            // Prefer swap_players for opposite-direction pairs: avoids temporarily
-            // overcrowding an army's slots, which causes the server to spec players.
-            var scheduled = {};
-            var moveDelay = 0;
-            var directMoves = [];
+            var pids = balancePlayers.map(function (p) { return p.playerId; });
 
-            needsMove.forEach(function (pid) {
-                if (scheduled[pid]) return;
+            function firstMisplaced() {
+                for (var i = 0; i < pids.length; i++) {
+                    if (liveArmyOf[pids[i]] !== targetArmyOf[pids[i]])
+                        return pids[i];
+                }
+                return null;
+            }
+
+            var ops = [];   // { swap:[a,b] } or { move:pid, army:to }
+            var guard = 0;
+            var pid;
+            while ((pid = firstMisplaced()) !== null && guard++ < 1000) {
+                var from = liveArmyOf[pid];
                 var to = targetArmyOf[pid];
-                var from = currentArmyOf[pid];
-                // Find a counterpart going the opposite direction
-                var partner = null;
-                for (var i = 0; i < needsMove.length; i++) {
-                    var other = needsMove[i];
-                    if (!scheduled[other] && other !== pid &&
-                        currentArmyOf[other] === to && targetArmyOf[other] === from) {
-                        partner = other;
-                        break;
-                    }
-                }
-                if (partner) {
-                    scheduled[pid] = true;
-                    scheduled[partner] = true;
-                    setTimeout((function (p1, p2) {
-                        return function () {
-                            model.send_message('swap_players', { player1: p1, player2: p2 });
-                        };
-                    }(pid, partner)), moveDelay);
-                    moveDelay += 200;
-                } else {
-                    directMoves.push(pid);
-                }
-            });
 
-            // Fire any remaining direct moves after all swaps complete
-            directMoves.forEach(function (pid) {
-                setTimeout((function (p) {
+                if (liveCount[to] < armyCapacity[to]) {
+                    // Target has room: a plain move is safe.
+                    ops.push({ move: pid, army: to });
+                    liveCount[from]--;
+                    liveCount[to]++;
+                    liveArmyOf[pid] = to;
+                } else {
+                    // Target is full: swap with an occupant who belongs elsewhere.
+                    var partner = null;
+                    for (var i = 0; i < pids.length; i++) {
+                        var q = pids[i];
+                        if (q !== pid && liveArmyOf[q] === to && targetArmyOf[q] !== to) {
+                            partner = q;
+                            break;
+                        }
+                    }
+                    if (partner === null) break; // counts inconsistent; bail rather than risk a spec-kick
+                    ops.push({ swap: [pid, partner] });
+                    liveArmyOf[pid] = to;
+                    liveArmyOf[partner] = from;
+                    // a swap leaves liveCount unchanged
+                }
+            }
+
+            // Fire the operations in order, staggered so the server applies them
+            // sequentially against the slot state we simulated above.
+            var moveDelay = 0;
+            ops.forEach(function (op) {
+                setTimeout((function (o) {
                     return function () {
-                        model.send_message('move_player', { player: p, army: targetArmyOf[p] });
+                        if (o.swap)
+                            model.send_message('swap_players', { player1: o.swap[0], player2: o.swap[1] });
+                        else
+                            model.send_message('move_player', { player: o.move, army: o.army });
                     };
-                }(pid)), moveDelay);
+                }(op)), moveDelay);
                 moveDelay += 200;
             });
 
